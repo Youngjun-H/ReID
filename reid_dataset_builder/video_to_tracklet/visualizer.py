@@ -36,19 +36,25 @@ class ProgressVisualizer:
         # frame_interval에 따른 설명 생성
         interval_desc = f" (매 {self.frame_interval}프레임)" if self.frame_interval > 1 else ""
         
-        if self.dynamic_mode:
-            if is_avi:
-                # AVI 동적 모드: AVI 파일 특성 명시
-                self.pbar = tqdm(desc=f"🎥 AVI 처리 중{interval_desc}", 
-                                unit="frame", unit_scale=True)
+        try:
+            if self.dynamic_mode:
+                if is_avi:
+                    # AVI 동적 모드: AVI 파일 특성 명시
+                    self.pbar = tqdm(desc=f"🎥 AVI 처리 중{interval_desc}", 
+                                    unit="frame", unit_scale=True, 
+                                    total=None, disable=False)
+                else:
+                    # 일반 동적 모드: 총 프레임 수를 모르므로 무한 진행률 표시
+                    self.pbar = tqdm(desc=f"🎥 처리 중{interval_desc}", 
+                                    unit="frame", unit_scale=True,
+                                    total=None, disable=False)
             else:
-                # 일반 동적 모드: 총 프레임 수를 모르므로 무한 진행률 표시
-                self.pbar = tqdm(desc=f"🎥 처리 중{interval_desc}", 
-                                unit="frame", unit_scale=True)
-        else:
-            # 정적 모드: 알려진 총 프레임 수 사용
-            self.pbar = tqdm(total=self.total_frames, desc=f"🎥 처리 중{interval_desc}", 
-                            unit="frame", unit_scale=True)
+                # 정적 모드: 알려진 총 프레임 수 사용
+                self.pbar = tqdm(total=self.total_frames, desc=f"🎥 처리 중{interval_desc}", 
+                                unit="frame", unit_scale=True, disable=False)
+        except Exception as e:
+            print(f"⚠️  Progress bar 초기화 오류: {e}")
+            self.pbar = None
     
     def print_video_info(self):
         """비디오 정보 출력"""
@@ -95,42 +101,51 @@ class ProgressVisualizer:
                 self.unique_ids.add(int(track[4]))
         
         # Progress bar 업데이트 (매 10프레임마다)
-        if self.frame_id % 10 == 0:
-            if self.dynamic_mode:
-                # 동적 모드: 프레임 수만 업데이트
-                self.pbar.update(10)
-                
-                # frame_count와 processed_frames가 제공된 경우 사용
-                if frame_count is not None and processed_frames is not None:
-                    self.pbar.set_postfix({
-                        'Total Frames': f'{frame_count:,}',
-                        'Processed': f'{processed_frames:,}',
-                        'Current': len(tracks),  # 현재 프레임의 tracklet 수
-                        'Total Tracks': f'{self.total_tracks:,}',  # 누적된 총 tracklet 수
-                        'Unique IDs': len(self.unique_ids)
-                    })
+        if self.frame_id % 10 == 0 and self.pbar is not None:
+            try:
+                if self.dynamic_mode:
+                    # 동적 모드: 프레임 수만 업데이트
+                    self.pbar.update(10)
+                    
+                    # frame_count와 processed_frames가 제공된 경우 사용
+                    if frame_count is not None and processed_frames is not None:
+                        self.pbar.set_postfix({
+                            'Total Frames': f'{frame_count:,}',
+                            'Processed': f'{processed_frames:,}',
+                            'Current': len(tracks),  # 현재 프레임의 tracklet 수
+                            'Total Tracks': f'{self.total_tracks:,}',  # 누적된 총 tracklet 수
+                            'Unique IDs': len(self.unique_ids)
+                        })
+                    else:
+                        self.pbar.set_postfix({
+                            'Frames': f'{self.frame_id:,}',
+                            'Current': len(tracks),  # 현재 프레임의 tracklet 수
+                            'Total Tracks': f'{self.total_tracks:,}',  # 누적된 총 tracklet 수
+                            'Unique IDs': len(self.unique_ids)
+                        })
                 else:
+                    # 정적 모드: 진행률 포함
+                    self.pbar.update(10)
+                    progress_percent = (self.frame_id / self.total_frames) * 100 if self.total_frames > 0 else 0
                     self.pbar.set_postfix({
-                        'Frames': f'{self.frame_id:,}',
                         'Current': len(tracks),  # 현재 프레임의 tracklet 수
                         'Total Tracks': f'{self.total_tracks:,}',  # 누적된 총 tracklet 수
-                        'Unique IDs': len(self.unique_ids)
+                        'Unique IDs': len(self.unique_ids),
+                        'Progress': f'{progress_percent:.1f}%'
                     })
-            else:
-                # 정적 모드: 진행률 포함
-                self.pbar.update(10)
-                progress_percent = (self.frame_id / self.total_frames) * 100 if self.total_frames > 0 else 0
-                self.pbar.set_postfix({
-                    'Current': len(tracks),  # 현재 프레임의 tracklet 수
-                    'Total Tracks': f'{self.total_tracks:,}',  # 누적된 총 tracklet 수
-                    'Unique IDs': len(self.unique_ids),
-                    'Progress': f'{progress_percent:.1f}%'
-                })
+            except (TypeError, AttributeError) as e:
+                # tqdm 오류 발생 시 progress bar 비활성화
+                print(f"⚠️  Progress bar 업데이트 오류: {e}")
+                self.pbar = None
     
     def close(self):
         """Progress bar 종료 및 최종 통계 출력"""
-        if self.pbar:
-            self.pbar.close()
+        try:
+            if self.pbar is not None:
+                self.pbar.close()
+        except (TypeError, AttributeError):
+            # tqdm 버전에 따른 오류 처리
+            pass
         
         # 처리 시간 계산
         end_time = time.time()
