@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ReID Embedding Extractor - PyTorch 최신 버전 호환
+ReID Embedding Extractor - 독립적인 버전
 SOLIDER_REID 모델을 사용하여 사람 이미지에서 ReID 임베딩을 추출하는 최적화된 클래스
+SOLIDER_REID 의존성을 제거하고 완전히 독립적으로 작동
 """
 
 import os
@@ -16,17 +17,17 @@ from typing import Union, List, Tuple, Optional
 from pathlib import Path
 import logging
 
-# SOLIDER_REID 모델 경로 추가
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'models', 'SOLIDER_REID'))
-
+# 독립적인 모듈들 import
 try:
-    from model import make_model
+    # 패키지로 import될 때 (상대 import)
+    from .config import cfg
+    from .model_factory import make_model
+    from .utils import setup_logger
+except ImportError:
+    # 직접 실행될 때 (절대 import)
     from config import cfg
-    from utils.logger import setup_logger
-except ImportError as e:
-    print(f"SOLIDER_REID 모듈을 찾을 수 없습니다: {e}")
-    print("SOLIDER_REID 모델이 필요합니다.")
-    sys.exit(1)
+    from model_factory import make_model
+    from utils import setup_logger
 
 
 class ReIDEmbeddingExtractor:
@@ -88,13 +89,40 @@ class ReIDEmbeddingExtractor:
             cfg.merge_from_file(config_path)
             self.logger.info(f"설정 파일 로드: {config_path}")
         else:
-            # 기본 설정 사용
-            self.logger.info("기본 설정 사용")
+            # 모델 이름으로 설정 파일 자동 찾기
+            try:
+                from .config import find_config_file, get_available_configs
+            except ImportError:
+                from config import find_config_file, get_available_configs
+            
+            # 모델 경로에서 모델 이름 추출 시도
+            model_name = None
+            if hasattr(self, 'model_path') and self.model_path:
+                model_path = Path(self.model_path)
+                # 파일명에서 모델 타입 추출 (예: swin_base_model.pth -> swin_base)
+                for name in ['swin_base', 'swin_tiny', 'swin_small']:
+                    if name in model_path.stem:
+                        model_name = name
+                        break
+            
+            if model_name:
+                auto_config_path = find_config_file(model_name)
+                if auto_config_path:
+                    cfg.merge_from_file(auto_config_path)
+                    self.logger.info(f"자동 설정 파일 로드: {auto_config_path}")
+                else:
+                    self.logger.info(f"모델 '{model_name}'에 대한 설정 파일을 찾을 수 없습니다. 기본 설정 사용")
+                    available_configs = get_available_configs()
+                    if available_configs:
+                        self.logger.info(f"사용 가능한 설정: {', '.join(available_configs)}")
+            else:
+                # 기본 설정 사용
+                self.logger.info("기본 설정 사용")
         
         # 필수 설정 적용
-        cfg.MODEL.SEMANTIC_WEIGHT = self.semantic_weight
-        cfg.INPUT.SIZE_TRAIN = list(self.image_size)
-        cfg.INPUT.SIZE_TEST = list(self.image_size)
+        cfg.MODEL.semantic_weight = self.semantic_weight
+        cfg.INPUT.size_train = list(self.image_size)
+        cfg.INPUT.size_test = list(self.image_size)
         cfg.freeze()
     
     def _load_model(self, model_path: str):
@@ -129,7 +157,7 @@ class ReIDEmbeddingExtractor:
         self.transform = T.Compose([
             T.Resize(self.image_size, interpolation=T.InterpolationMode.BICUBIC),
             T.ToTensor(),
-            T.Normalize(mean=cfg.INPUT.PIXEL_MEAN, std=cfg.INPUT.PIXEL_STD)
+            T.Normalize(mean=cfg.INPUT.pixel_mean, std=cfg.INPUT.pixel_std)
         ])
         
         self.logger.info("이미지 전처리 변환 설정 완료")
