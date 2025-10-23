@@ -1,2 +1,6 @@
 # Models package for independent ReID embedding extractor
-from .swin_transformer import *
+from .solider import SOLIDEREmbeddingExtractor
+
+__all__ = [
+    'SOLIDEREmbeddingExtractor'
+]

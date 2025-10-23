@@ -1366,9 +1366,9 @@ class SwinTransformer(BaseModule):
 
     def forward(self, x, semantic_weight=None):
         if self.semantic_weight >= 0 and semantic_weight == None:
-            w = torch.ones(x.shape[0],1) * self.semantic_weight
+            w = torch.ones(x.shape[0],1, device=x.device) * self.semantic_weight
             w = torch.cat([w, 1-w], axis=-1)
-            semantic_weight = w.cuda()
+            semantic_weight = w
 
         x, hw_shape = self.patch_embed(x)
 
