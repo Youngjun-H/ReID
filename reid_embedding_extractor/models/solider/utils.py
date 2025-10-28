@@ -57,3 +57,5 @@ def get_transformer_type(model_name: str) -> str:
         'swin_tiny': 'swin_tiny_patch4_window7_224'
     }
     return mapping.get(model_name, 'swin_base_patch4_window7_224')
+
+
