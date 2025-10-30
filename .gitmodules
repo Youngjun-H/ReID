@@ -1,0 +1,3 @@
+[submodule "models/deep-person-reid"]
+	path = models/deep-person-reid
+	url = https://github.com/KaiyangZhou/deep-person-reid.git
