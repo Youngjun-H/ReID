@@ -155,11 +155,11 @@ def main():
     parser.add_argument('--tracklets_dir', type=str, default='/data/reid/reid_master/tracklets')
     parser.add_argument('--model_path', type=str, default='/data/reid/reid_master/reid_dataset_builder/features/models/solider/checkpoints/swin_base_msmt17.pth')
     parser.add_argument('--config_path', type=str, default='/data/reid/reid_master/reid_dataset_builder/features/models/solider/configs/msmt17/swin_base.yml')
-    parser.add_argument('--output_dir', type=str, default='/data/reid/reid_master/solider_cross_camera_results_0.7_semantic_weight_0.5')
+    parser.add_argument('--output_dir', type=str, default='/data/reid/reid_master/solider_cross_camera_results_0.7_semantic_weight_0.2')
     parser.add_argument('--metric', type=str, default='cosine', choices=['cosine', 'euclidean'])
     parser.add_argument('--threshold', type=float, default=0.7)
     parser.add_argument('--device', type=str, default='cuda')
-    parser.add_argument('--semantic_weight', type=float, default=0.5)
+    parser.add_argument('--semantic_weight', type=float, default=0.2)
     args = parser.parse_args()
 
     logger = setup_logger()
