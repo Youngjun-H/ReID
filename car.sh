@@ -1,0 +1,9 @@
+python dataset_builder_car/pipeline.py \
+    --source /data/reid/reid_master/dataset_builder_car/2025-10-21-09-00-00-외부간판.mp4 \
+    --output vehicle_crops \
+    --weights yolo11x.pt \
+    --conf 0.7 \
+    --iou 0.5 \
+    --max-per-track 100 \
+    --stationary-rel-thresh 0.002 \
+    --stationary-patience 30 \
