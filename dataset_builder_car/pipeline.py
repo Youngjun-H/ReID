@@ -1,9 +1,10 @@
 from ultralytics import YOLO
 import os
 import argparse
-from collections import defaultdict
-from collections import deque
+from collections import defaultdict, deque
 import cv2
+import numpy as np
+from pathlib import Path
 
 
 def ensure_dir(path: str) -> None:
@@ -15,8 +16,42 @@ def clamp(val: int, low: int, high: int) -> int:
     return max(low, min(high, val))
 
 
-def run(
-    source_path: str,
+# 박스 유사도 판단 함수 (크기/거리 기반)
+def is_same_object(b1, b2, diag, size_tol=0.25, dist_tol=0.03):
+    x1, y1, x2, y2 = b1
+    u1, v1, u2, v2 = b2
+    cx1, cy1 = (x1 + x2) / 2, (y1 + y2) / 2
+    cx2, cy2 = (u1 + u2) / 2, (v1 + v2) / 2
+    w1, h1 = x2 - x1, y2 - y1
+    w2, h2 = u2 - u1, v2 - v1
+
+    size_ratio = abs((w1 * h1) - (w2 * h2)) / (w1 * h1 + 1e-6)
+    dist = np.sqrt((cx1 - cx2) ** 2 + (cy1 - cy2) ** 2) / diag
+    return size_ratio < size_tol and dist < dist_tol
+
+
+def get_video_files(source_path: str) -> list:
+    """디렉토리 또는 파일 경로에서 비디오 파일 목록을 반환"""
+    video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv', '.m4v', '.webm'}
+    source = Path(source_path)
+    
+    if source.is_file():
+        if source.suffix.lower() in video_extensions:
+            return [str(source)]
+        else:
+            return []
+    elif source.is_dir():
+        video_files = []
+        for ext in video_extensions:
+            video_files.extend(source.glob(f'*{ext}'))
+            video_files.extend(source.glob(f'*{ext.upper()}'))
+        return sorted([str(f) for f in video_files])
+    else:
+        return []
+
+
+def run_single_video(
+    video_path: str,
     output_dir: str,
     model_path: str = "yolo11x.pt",
     conf: float = 0.3,
@@ -26,36 +61,30 @@ def run(
     stationary_rel_thresh: float = 0.002,
     stationary_patience: int = 30,
 ) -> None:
-    """
-    - source_path: 로컬 영상 파일 또는 디렉토리 경로
-    - output_dir: 트랙별 크롭 저장 경로
-    - model_path: YOLO 가중치 경로
-    - max_frames_per_track: 트랙별 저장 프레임 상한
-    - stationary_rel_thresh: 프레임 대각선 대비 이동 임계비 (정지 판단)
-    - stationary_patience: 임계 이하 이동이 연속으로 발생해야 하는 프레임 수
-    """
-
-    ensure_dir(output_dir)
-
-    # COCO 차량 계열 클래스 인덱스: bicycle(1), car(2), motorcycle(3), bus(5), truck(7)
-    vehicle_classes = [1, 2, 3, 5, 7]
-
+    """단일 비디오 파일에 대해 추적 및 크롭 저장 수행"""
+    
+    # 영상 이름으로 출력 디렉토리 생성
+    video_name = os.path.splitext(os.path.basename(video_path))[0]
+    video_output_dir = os.path.join(output_dir, video_name)
+    ensure_dir(video_output_dir)
+    
+    vehicle_classes = [2, 3, 5, 7]
     model = YOLO(model_path)
 
-    saved_counts = defaultdict(int)  # track_id -> saved image count
-    last_centers = {}  # track_id -> (cx, cy)
-    stationary_streak = defaultdict(int)  # track_id -> consecutive frames below movement threshold
-    frozen_ids = set()  # track_ids no longer saved (cap reached or stationary)
-    last_boxes = {}  # canonical_track_id -> [x1, y1, x2, y2]
-    recent_lost = deque(maxlen=200)  # deque of (track_id, bbox, last_seen_frame)
-    id_remap = {}  # raw_id -> canonical_id
-    last_seen = {}  # track_id -> frame_index
+    saved_counts = defaultdict(int)
+    last_centers = {}
+    stationary_streak = defaultdict(int)
+    frozen_ids = set()
+    frozen_db = []  # [(bbox, last_seen_frame, diag)]
+    last_boxes = {}
+    recent_lost = deque(maxlen=200)
+    id_remap = {}
+    last_seen = {}
 
     frame_index = 0
 
-    # stream=True 로 프레임 단위 결과를 순회하면서 사용자 정의 처리
     for result in model.track(
-        source=source_path,
+        source=video_path,
         conf=conf,
         iou=iou,
         show=show,
@@ -63,8 +92,9 @@ def run(
         tracker="bytetrack.yaml",
         persist=True,
         stream=True,
+        device=0,  # GPU 사용 (CUDA device 0)
     ):
-        frame = result.orig_img  # numpy array (H, W, C)
+        frame = result.orig_img
         h, w = frame.shape[:2]
         diag = (h * h + w * w) ** 0.5
         move_thresh = stationary_rel_thresh * diag
@@ -77,11 +107,10 @@ def run(
         xyxys = result.boxes.xyxy.int().tolist()
         clss = result.boxes.cls.int().tolist()
 
-        # 비디오 파일명 힌트를 저장 경로에 반영 (소스 경로가 있다면)
         src_path = getattr(result, "path", None)
         src_name = os.path.splitext(os.path.basename(src_path if src_path else "unknown"))[0]
 
-        # ---------- ID 스티칭: raw ID를 canonical ID로 매핑 ----------
+        # ------------------ ID 병합 ------------------
         def iou_xyxy(a, b):
             ax1, ay1, ax2, ay2 = a
             bx1, by1, bx2, by2 = b
@@ -102,22 +131,22 @@ def run(
             best_id = cand_id
             best_iou = 0.0
 
-            # 현존 트랙과 비교
+            # 기존 트랙과 비교
             for prev_id, prev_box in last_boxes.items():
                 iou_val = iou_xyxy(bbox, prev_box)
                 if iou_val > best_iou:
                     best_iou = iou_val
                     best_id = prev_id
 
-            # 최근 잃은 트랙과도 비교 (최대 30프레임 갭)
+            # 최근 잃은 트랙도 비교
             if best_iou < 0.6:
                 for prev_id, prev_box, seen in reversed(recent_lost):
-                    if frame_index - seen > 30:
+                    if frame_index - seen > 60:
                         break
-                    iou_val = iou_xyxy(bbox, prev_box)
-                    if iou_val > best_iou:
-                        best_iou = iou_val
+                    if is_same_object(prev_box, bbox, diag):
+                        best_iou = 1.0
                         best_id = prev_id
+                        break
 
             if best_iou >= 0.6:
                 id_remap[raw_id] = best_id
@@ -125,7 +154,7 @@ def run(
             else:
                 canonical_ids.append(cand_id)
 
-        # 이번 프레임에 보이지 않는 이전 트랙을 recent_lost에 기록
+        # ------------------ 트랙 관리 ------------------
         alive = set(canonical_ids)
         for tid in list(last_boxes.keys()):
             if tid not in alive:
@@ -134,20 +163,23 @@ def run(
 
         for raw_id, canon_id, bbox, cls_idx in zip(ids, canonical_ids, xyxys, clss):
             track_id = canon_id
-            if track_id in frozen_ids:
-                continue
-
             x1, y1, x2, y2 = bbox
-            x1 = clamp(x1, 0, w - 1)
-            y1 = clamp(y1, 0, h - 1)
-            x2 = clamp(x2, 0, w - 1)
-            y2 = clamp(y2, 0, h - 1)
+            x1, y1, x2, y2 = clamp(x1, 0, w - 1), clamp(y1, 0, h - 1), clamp(x2, 0, w - 1), clamp(y2, 0, h - 1)
             if x2 <= x1 or y2 <= y1:
                 continue
 
-            # 정지 차량 억제: 중심 이동량 기반
-            cx = (x1 + x2) / 2.0
-            cy = (y1 + y2) / 2.0
+            # ----------- 정지 차량 DB와 비교 -----------
+            skip_save = False
+            for fb, f_seen, f_diag in frozen_db:
+                if frame_index - f_seen < 2000:  # 약 1분 내 재등장
+                    if is_same_object(fb, bbox, diag=f_diag):
+                        skip_save = True
+                        break
+            if skip_save:
+                continue
+
+            # ----------- 중심 이동 기반 정지 판별 -----------
+            cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
             if track_id in last_centers:
                 px, py = last_centers[track_id]
                 dist = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
@@ -157,25 +189,34 @@ def run(
                     stationary_streak[track_id] = 0
             last_centers[track_id] = (cx, cy)
 
+            # 정지 확정 → DB 저장 & 동결
             if stationary_streak[track_id] >= stationary_patience:
                 frozen_ids.add(track_id)
+                frozen_db.append(([x1, y1, x2, y2], frame_index, diag))
                 continue
 
-            # 트랙별 저장 상한
+            # 프레임당 저장 제한
             if saved_counts[track_id] >= max_frames_per_track:
                 frozen_ids.add(track_id)
+                frozen_db.append(([x1, y1, x2, y2], frame_index, diag))
                 continue
 
+            # 동결된 트랙은 저장하지 않음
+            if track_id in frozen_ids:
+                continue
+
+            # ----------- 저장 -----------
             crop = frame[y1:y2, x1:x2]
             if crop.size == 0:
                 continue
 
-            track_dir = os.path.join(output_dir, f"track_{int(track_id)}")
+            track_dir = os.path.join(video_output_dir, f"track_{int(track_id)}")
             ensure_dir(track_dir)
             idx = saved_counts[track_id]
             out_name = f"{src_name}_f{frame_index:06d}_{idx:03d}.jpg"
             out_path = os.path.join(track_dir, out_name)
             cv2.imwrite(out_path, crop)
+
             saved_counts[track_id] += 1
             last_boxes[track_id] = [x1, y1, x2, y2]
             last_seen[track_id] = frame_index
@@ -183,51 +224,61 @@ def run(
         frame_index += 1
 
 
+def run(
+    source_path: str,
+    output_dir: str,
+    model_path: str = "yolo11x.pt",
+    conf: float = 0.3,
+    iou: float = 0.5,
+    show: bool = False,
+    max_frames_per_track: int = 200,
+    stationary_rel_thresh: float = 0.002,
+    stationary_patience: int = 30,
+) -> None:
+    """source_path가 디렉토리인 경우 모든 비디오 파일을 처리, 파일인 경우 단일 파일 처리"""
+    
+    ensure_dir(output_dir)
+    video_files = get_video_files(source_path)
+    
+    if not video_files:
+        print(f"경고: {source_path}에서 비디오 파일을 찾을 수 없습니다.")
+        return
+    
+    print(f"총 {len(video_files)}개의 비디오 파일을 처리합니다.")
+    
+    for idx, video_path in enumerate(video_files, 1):
+        print(f"\n[{idx}/{len(video_files)}] 처리 중: {video_path}")
+        try:
+            run_single_video(
+                video_path=video_path,
+                output_dir=output_dir,
+                model_path=model_path,
+                conf=conf,
+                iou=iou,
+                show=show,
+                max_frames_per_track=max_frames_per_track,
+                stationary_rel_thresh=stationary_rel_thresh,
+                stationary_patience=stationary_patience,
+            )
+            print(f"완료: {video_path}")
+        except Exception as e:
+            print(f"오류 발생 ({video_path}): {e}")
+            continue
+    
+    print(f"\n모든 처리 완료! 결과는 {output_dir}에 저장되었습니다.")
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Vehicle-only tracking and crop saver")
-    parser.add_argument(
-        "--source",
-        type=str,
-        default="/data/reid/reid_master/dataset_builder_car/2025-10-29-11-30-00-외부간판.mp4",
-        help="로컬 영상 파일 경로 또는 디렉터리 경로 (이미지/비디오 지원)",
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default="runs/vehicle_crops",
-        help="크롭 이미지 저장 경로",
-    )
-    parser.add_argument(
-        "--weights",
-        type=str,
-        default="yolo11x.pt",
-        help="YOLO 가중치 경로",
-    )
+    parser = argparse.ArgumentParser(description="Vehicle-only tracking and crop saver (enhanced)")
+    parser.add_argument("--source", type=str, default="/data/reid/reid_master/dataset_builder_car/video/1103", help="영상 경로 또는 디렉토리")
+    parser.add_argument("--output", type=str, default="runs/1103", help="크롭 저장 경로")
+    parser.add_argument("--weights", type=str, default="yolo11n.pt", help="YOLO 가중치")
     parser.add_argument("--conf", type=float, default=0.7, help="confidence threshold")
-    parser.add_argument("--iou", type=float, default=0.5, help="NMS IoU threshold")
-    parser.add_argument(
-        "--show",
-        action="store_true",
-        help="시각화 윈도우 표시",
-    )
-    parser.add_argument(
-        "--max-per-track",
-        type=int,
-        default=100,
-        help="트랙별 저장 프레임 상한",
-    )
-    parser.add_argument(
-        "--stationary-rel-thresh",
-        type=float,
-        default=0.002,
-        help="정지 판단 임계비 (프레임 대각선 대비 이동량)",
-    )
-    parser.add_argument(
-        "--stationary-patience",
-        type=int,
-        default=30,
-        help="정지 판단 연속 프레임 수",
-    )
+    parser.add_argument("--iou", type=float, default=0.5, help="IoU threshold")
+    parser.add_argument("--show", action="store_true", help="시각화 여부")
+    parser.add_argument("--max-per-track", type=int, default=200, help="트랙별 저장 제한")
+    parser.add_argument("--stationary-rel-thresh", type=float, default=0.002, help="정지 임계비")
+    parser.add_argument("--stationary-patience", type=int, default=30, help="정지 프레임 수")
     return parser.parse_args()
 
 
