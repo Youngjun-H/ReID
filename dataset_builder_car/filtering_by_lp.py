@@ -12,33 +12,64 @@ def ensure_dir(path: str) -> None:
         os.makedirs(path, exist_ok=True)
 
 
-def has_license_plate(image_path: str, lp_detection_model: YOLO) -> tuple[bool, float]:
+def detect_license_plate(image_path: str, lp_detection_model: YOLO) -> tuple[bool, float, list]:
     """
-    이미지에 번호판이 있는지 확인하고 최고 confidence 값을 반환
+    이미지에 번호판이 있는지 확인하고 최고 confidence 값과 bounding box 정보를 반환
     
     Returns:
-        (bool, float): (번호판 감지 여부, 최고 confidence 값)
+        (bool, float, list): (번호판 감지 여부, 최고 confidence 값, bounding box 리스트)
+                            bounding box는 [x1, y1, x2, y2] 형식의 리스트
     """
     try:
         image_crop = cv2.imread(image_path)
         if image_crop is None:
-            return False, 0.0
+            return False, 0.0, []
         
         lp_detection_results = lp_detection_model(image_crop, conf=0.6, verbose=False)[0]
         
         # detection 결과가 있고 boxes가 있으면 번호판이 감지된 것
         if lp_detection_results.boxes is not None and len(lp_detection_results.boxes) > 0:
-            # 최고 confidence 값 반환
+            # 최고 confidence 값을 가진 box 찾기
             confidences = lp_detection_results.boxes.conf.cpu().numpy()
-            max_conf = float(confidences.max())
-            return True, max_conf
-        return False, 0.0
+            max_idx = confidences.argmax()
+            max_conf = float(confidences[max_idx])
+            
+            # 최고 confidence를 가진 box의 좌표 추출
+            box = lp_detection_results.boxes.xyxy[max_idx].cpu().numpy()
+            bbox = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]  # [x1, y1, x2, y2]
+            
+            return True, max_conf, bbox
+        return False, 0.0, []
     except Exception as e:
         print(f"Error processing {image_path}: {e}")
-        return False, 0.0
+        return False, 0.0, []
 
 
-def process_runs_directory(runs_dir: str, output_dir: str, lp_detection_model_path: str):
+def crop_license_plate(image, bbox: list):
+    """
+    이미지에서 bounding box 영역을 crop
+    
+    Args:
+        image: 원본 이미지
+        bbox: [x1, y1, x2, y2] 형식의 bounding box 좌표
+    
+    Returns:
+        crop된 이미지
+    """
+    x1, y1, x2, y2 = bbox
+    # 이미지 범위를 벗어나지 않도록 처리
+    h, w = image.shape[:2]
+    x1 = max(0, min(x1, w))
+    y1 = max(0, min(y1, h))
+    x2 = max(0, min(x2, w))
+    y2 = max(0, min(y2, h))
+    
+    if x2 > x1 and y2 > y1:
+        return image[y1:y2, x1:x2]
+    return None
+
+
+def process_runs_directory(runs_dir: str, output_dir: str, lp_detection_model_path: str, output_lp_dir: str = None):
     """
     runs 디렉토리 내의 모든 하위 디렉토리를 재귀적으로 순회하며 track_* 디렉토리의 번호판이 감지된 이미지만 필터링
     
@@ -46,15 +77,19 @@ def process_runs_directory(runs_dir: str, output_dir: str, lp_detection_model_pa
         runs_dir: 원본 runs 디렉토리 경로
         output_dir: 필터링된 결과를 저장할 디렉토리 경로
         lp_detection_model_path: 번호판 detection 모델 경로
+        output_lp_dir: crop된 번호판 이미지를 저장할 디렉토리 경로 (None이면 저장하지 않음)
     """
     runs_path = Path(runs_dir)
     output_path = Path(output_dir)
+    output_lp_path = Path(output_lp_dir) if output_lp_dir else None
     
     if not runs_path.exists():
         print(f"Error: {runs_dir} 디렉토리가 존재하지 않습니다.")
         return
     
     ensure_dir(output_dir)
+    if output_lp_dir:
+        ensure_dir(output_lp_dir)
     
     # 번호판 detection 모델 로드
     print(f"번호판 detection 모델 로드 중: {lp_detection_model_path}")
@@ -87,37 +122,54 @@ def process_runs_directory(runs_dir: str, output_dir: str, lp_detection_model_pa
         if not image_files:
             continue
         
-        # 번호판이 감지된 이미지만 필터링 (confidence 값 포함)
-        filtered_images = []  # (image_path, confidence) 튜플 리스트
+        # 번호판이 감지된 이미지만 필터링 (confidence 값 및 bounding box 포함)
+        filtered_images = []  # (image_path, confidence, bbox) 튜플 리스트
         for image_path in tqdm(image_files, desc=f"    {relative_path} 이미지 검사", leave=False):
-            has_lp, conf_value = has_license_plate(str(image_path), lp_detection_model)
+            has_lp, conf_value, bbox = detect_license_plate(str(image_path), lp_detection_model)
             if has_lp:
-                filtered_images.append((image_path, conf_value))
+                filtered_images.append((image_path, conf_value, bbox))
         
-        # 번호판이 감지된 이미지가 하나라도 있으면 해당 track_id 디렉토리 생성 및 저장
+        # 번호판이 감지된 이미지만 저장 (번호판이 감지된 이미지가 하나도 없으면 해당 track 디렉토리는 생성하지 않음)
         if filtered_images:
             ensure_dir(str(output_track_dir))
             
-            for image_path, conf_value in filtered_images:
-                # 파일명에 confidence 값 추가
-                # 예: original_name.jpg -> original_name_conf0.85.jpg
+            # 번호판 crop 저장용 디렉토리 설정
+            output_lp_track_dir = None
+            if output_lp_path:
+                output_lp_track_dir = output_lp_path / relative_path
+                ensure_dir(str(output_lp_track_dir))
+            
+            # 번호판이 감지된 이미지만 저장
+            for image_path, conf_value, bbox in filtered_images:
+                # 원본 이미지 읽기
+                image = cv2.imread(str(image_path))
+                if image is None:
+                    continue
+                
+                # 필터링된 전체 이미지 저장
                 original_name = image_path.stem
                 original_ext = image_path.suffix
                 new_filename = f"{original_name}_conf{conf_value:.2f}{original_ext}"
                 output_image_path = output_track_dir / new_filename
+                cv2.imwrite(str(output_image_path), image)
                 
-                # 이미지 복사
-                image = cv2.imread(str(image_path))
-                if image is not None:
-                    cv2.imwrite(str(output_image_path), image)
+                # 번호판 crop 이미지 저장
+                if output_lp_path and bbox:
+                    lp_cropped = crop_license_plate(image, bbox)
+                    if lp_cropped is not None:
+                        lp_filename = f"{original_name}_lp_conf{conf_value:.2f}{original_ext}"
+                        output_lp_path_full = output_lp_track_dir / lp_filename
+                        cv2.imwrite(str(output_lp_path_full), lp_cropped)
             
-            print(f"  {relative_path}: {len(filtered_images)}/{len(image_files)} 이미지 저장")
+            lp_info = f", 번호판 crop: {len(filtered_images)}개" if output_lp_path else ""
+            print(f"  {relative_path}: {len(filtered_images)}/{len(image_files)} 이미지 저장 (번호판 감지된 이미지만 저장){lp_info}")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="번호판 detection으로 이미지 필터링")
-    parser.add_argument("--runs_dir", type=str, default="runs", help="원본 runs 디렉토리 경로")
-    parser.add_argument("--output_dir", type=str, default="runs_filtered_by_lp", help="필터링된 결과를 저장할 디렉토리 경로")
+    parser.add_argument("--runs_dir", type=str, default="runs_1031", help="원본 runs 디렉토리 경로")
+    parser.add_argument("--output_dir", type=str, default="runs_1031_filtered_by_lp", help="필터링된 결과를 저장할 디렉토리 경로")
+    parser.add_argument("--output_lp_dir", type=str, default=None, help="crop된 번호판 이미지를 저장할 디렉토리 경로 (선택사항)")
     parser.add_argument("--lp_detection_model", type=str, required=True, help="번호판 detection 모델 경로")
     return parser.parse_args()
 
@@ -127,7 +179,8 @@ if __name__ == "__main__":
     process_runs_directory(
         runs_dir=args.runs_dir,
         output_dir=args.output_dir,
-        lp_detection_model_path=args.lp_detection_model
+        lp_detection_model_path=args.lp_detection_model,
+        output_lp_dir=args.output_lp_dir
     )
     print("처리 완료!")
 

@@ -8,4 +8,8 @@ __pycache__/
 *.png
 *.pth
 *.mdc
+*.lock
+*.toml
+.env
+.python-version
 ToDo/
