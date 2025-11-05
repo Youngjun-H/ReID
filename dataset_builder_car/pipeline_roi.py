@@ -6,6 +6,8 @@ import cv2
 import numpy as np
 from pathlib import Path
 import re
+from multiprocessing import Pool, cpu_count
+from functools import partial
 
 
 def ensure_dir(path: str) -> None:
@@ -157,15 +159,10 @@ def run_single_video(
     model = YOLO(model_path)
 
     saved_counts = defaultdict(int)
-    first_bbox = {}  # track_id별 첫 프레임의 bbox 저장
-    first_frame = {}  # track_id별 첫 프레임 번호 저장
-    frozen_ids = set()
-    frozen_db = []  # [(bbox, last_seen_frame, diag)]
     last_boxes = {}
     recent_lost = deque(maxlen=200)
     id_remap = {}
     last_seen = {}
-    check_interval = 30  # 주기적으로 체크할 프레임 간격
 
     frame_index = 0
     roi_filtered_count = 0  # ROI 필터링으로 제외된 객체 수
@@ -230,19 +227,8 @@ def run_single_video(
         alive = set(canonical_ids)
         for tid in list(last_boxes.keys()):
             if tid not in alive:
-                # 트랙이 사라지기 전에 마지막 체크: 첫 프레임과 마지막 프레임 비교
-                if tid in first_bbox and tid in last_boxes and tid not in frozen_ids:
-                    frames_since_first = last_seen.get(tid, frame_index - 1) - first_frame.get(tid, frame_index - 1)
-                    if frames_since_first >= 30:  # 최소 30프레임 이상 관찰된 경우만 체크
-                        if is_same_object(first_bbox[tid], last_boxes[tid], diag, size_tol=0.3, dist_tol=0.05):
-                            # 거의 움직이지 않았으면 정지 차량으로 판단
-                            frozen_ids.add(tid)
-                            frozen_db.append((last_boxes[tid], last_seen.get(tid, frame_index - 1), diag))
-                
                 recent_lost.append((tid, last_boxes[tid], last_seen.get(tid, frame_index - 1)))
                 # 정리: 사라진 트랙의 정보 제거
-                first_bbox.pop(tid, None)
-                first_frame.pop(tid, None)
                 last_boxes.pop(tid, None)
 
         for raw_id, canon_id, bbox, cls_idx in zip(ids, canonical_ids, xyxys, clss):
@@ -257,49 +243,8 @@ def run_single_video(
                 roi_filtered_count += 1
                 continue
 
-            # ----------- 정지 차량 DB와 비교 -----------
-            skip_save = False
-            for fb, f_seen, f_diag in frozen_db:
-                if frame_index - f_seen < 2000:  # 약 1분 내 재등장
-                    if is_same_object(fb, bbox, diag=f_diag):
-                        skip_save = True
-                        break
-            if skip_save:
-                continue
-
-            # ----------- 첫 프레임 bbox 초기화 -----------
-            if track_id not in first_bbox:
-                first_bbox[track_id] = [x1, y1, x2, y2]
-                first_frame[track_id] = frame_index
-
-            # ----------- 주기적으로 첫 프레임과 현재 프레임 비교 -----------
-            # 체크 조건: 일정 간격마다 또는 일정 프레임 수 이상 관찰되었을 때
-            should_check = False
-            if track_id in first_frame:
-                frames_since_first = frame_index - first_frame[track_id]
-                # check_interval 간격마다 체크하거나, 60프레임 이상 관찰되었을 때 체크
-                if frames_since_first >= check_interval and frames_since_first % check_interval == 0:
-                    should_check = True
-                elif frames_since_first >= 60 and saved_counts[track_id] >= 10:
-                    should_check = True
-
-            if should_check and track_id not in frozen_ids:
-                # 첫 프레임과 현재 프레임의 bbox 비교
-                fb = first_bbox[track_id]
-                if is_same_object(fb, [x1, y1, x2, y2], diag, size_tol=0.3, dist_tol=0.05):
-                    # 거의 움직이지 않았으면 정지 차량으로 판단
-                    frozen_ids.add(track_id)
-                    frozen_db.append(([x1, y1, x2, y2], frame_index, diag))
-                    continue
-
-            # 프레임당 저장 제한
+            # ----------- 프레임당 저장 제한 -----------
             if saved_counts[track_id] >= max_frames_per_track:
-                frozen_ids.add(track_id)
-                frozen_db.append(([x1, y1, x2, y2], frame_index, diag))
-                continue
-
-            # 동결된 트랙은 저장하지 않음
-            if track_id in frozen_ids:
                 continue
 
             # ----------- 저장 -----------
@@ -324,6 +269,34 @@ def run_single_video(
         print(f"  ROI 필터링으로 제외된 객체 수: {roi_filtered_count}")
 
 
+def process_single_video_wrapper(args_tuple):
+    """멀티프로세싱을 위한 wrapper 함수"""
+    (video_path, output_dir, model_path, conf, iou, show, 
+     max_frames_per_track, stationary_rel_thresh, stationary_patience,
+     rois, roi_min_iou, idx, total) = args_tuple
+    
+    try:
+        print(f"\n[{idx}/{total}] 처리 중: {video_path}")
+        run_single_video(
+            video_path=video_path,
+            output_dir=output_dir,
+            model_path=model_path,
+            conf=conf,
+            iou=iou,
+            show=show,
+            max_frames_per_track=max_frames_per_track,
+            stationary_rel_thresh=stationary_rel_thresh,
+            stationary_patience=stationary_patience,
+            rois=rois,
+            roi_min_iou=roi_min_iou,
+        )
+        print(f"[{idx}/{total}] 완료: {video_path}")
+        return (True, video_path, None)
+    except Exception as e:
+        print(f"[{idx}/{total}] 오류 발생 ({video_path}): {e}")
+        return (False, video_path, str(e))
+
+
 def run(
     source_path: str,
     output_dir: str,
@@ -336,8 +309,13 @@ def run(
     stationary_patience: int = 30,
     roi_file: str = None,
     roi_min_iou: float = 0.7,
+    num_workers: int = None,
 ) -> None:
-    """source_path가 디렉토리인 경우 모든 비디오 파일을 처리, 파일인 경우 단일 파일 처리"""
+    """source_path가 디렉토리인 경우 모든 비디오 파일을 처리, 파일인 경우 단일 파일 처리
+    
+    Args:
+        num_workers: 병렬 처리할 프로세스 수 (None이면 CPU 코어 수의 70% 사용)
+    """
     
     ensure_dir(output_dir)
     video_files = get_video_files(source_path)
@@ -357,11 +335,12 @@ def run(
     
     print(f"총 {len(video_files)}개의 비디오 파일을 처리합니다.")
     
-    for idx, video_path in enumerate(video_files, 1):
-        print(f"\n[{idx}/{len(video_files)}] 처리 중: {video_path}")
+    # 단일 비디오 파일인 경우 멀티프로세싱 불필요
+    if len(video_files) == 1:
+        print(f"처리 중: {video_files[0]}")
         try:
             run_single_video(
-                video_path=video_path,
+                video_path=video_files[0],
                 output_dir=output_dir,
                 model_path=model_path,
                 conf=conf,
@@ -373,18 +352,53 @@ def run(
                 rois=rois,
                 roi_min_iou=roi_min_iou,
             )
-            print(f"완료: {video_path}")
+            print(f"완료: {video_files[0]}")
         except Exception as e:
-            print(f"오류 발생 ({video_path}): {e}")
-            continue
+            print(f"오류 발생 ({video_files[0]}): {e}")
+        print(f"\n모든 처리 완료! 결과는 {output_dir}에 저장되었습니다.")
+        return
     
-    print(f"\n모든 처리 완료! 결과는 {output_dir}에 저장되었습니다.")
+    # 멀티프로세싱 설정
+    if num_workers is None:
+        # GPU 메모리 고려하여 CPU 코어 수의 70% 사용 (최소 1, 최대 CPU 코어 수)
+        num_workers = max(1, int(cpu_count() * 0.7))
+    
+    num_workers = min(num_workers, len(video_files))  # 비디오 수보다 많으면 의미 없음
+    
+    print(f"멀티프로세싱 사용: {num_workers}개 프로세스로 병렬 처리")
+    
+    # 각 비디오에 대한 인자 튜플 생성
+    args_list = [
+        (video_path, output_dir, model_path, conf, iou, show,
+         max_frames_per_track, stationary_rel_thresh, stationary_patience,
+         rois, roi_min_iou, idx + 1, len(video_files))
+        for idx, video_path in enumerate(video_files)
+    ]
+    
+    # 멀티프로세싱으로 처리
+    success_count = 0
+    fail_count = 0
+    
+    with Pool(processes=num_workers) as pool:
+        results = pool.map(process_single_video_wrapper, args_list)
+    
+    # 결과 집계
+    for success, video_path, error in results:
+        if success:
+            success_count += 1
+        else:
+            fail_count += 1
+    
+    print(f"\n모든 처리 완료!")
+    print(f"  성공: {success_count}개")
+    print(f"  실패: {fail_count}개")
+    print(f"  결과는 {output_dir}에 저장되었습니다.")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Vehicle-only tracking and crop saver with ROI filtering")
-    parser.add_argument("--source", type=str, default="/data/reid/reid_master/dataset_builder_car/video/test", help="영상 경로 또는 디렉토리")
-    parser.add_argument("--output", type=str, default="/data/reid/reid_master/dataset_builder_car/runs_test", help="크롭 저장 경로")
+    parser.add_argument("--source", type=str, default="/data/reid/reid_master/dataset_builder_car/video/1031", help="영상 경로 또는 디렉토리")
+    parser.add_argument("--output", type=str, default="/data/reid/reid_master/dataset_builder_car/runs_1031", help="크롭 저장 경로")
     parser.add_argument("--weights", type=str, default="yolo11n.pt", help="YOLO 가중치")
     parser.add_argument("--conf", type=float, default=0.7, help="confidence threshold")
     parser.add_argument("--iou", type=float, default=0.5, help="IoU threshold")
@@ -393,7 +407,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stationary-rel-thresh", type=float, default=0.002, help="정지 임계비 (사용 안함, 호환성 유지)")
     parser.add_argument("--stationary-patience", type=int, default=30, help="정지 프레임 수 (사용 안함, 호환성 유지)")
     parser.add_argument("--roi-file", type=str, default="/data/reid/reid_master/roi.txt", help="ROI 파일 경로 (None이면 ROI 필터링 없음)")
-    parser.add_argument("--roi-min-iou", type=float, default=0.7, help="ROI 필터링에 사용할 최소 IoU 임계값 (기본값 0.7 = 70%%)")
+    parser.add_argument("--roi-min-iou", type=float, default=0.1, help="ROI 필터링에 사용할 최소 IoU 임계값 (기본값 0.7 = 70%%)")
+    parser.add_argument("--num-workers", type=int, default=None, help="병렬 처리할 프로세스 수 (None이면 CPU 코어 수의 70%% 사용)")
     return parser.parse_args()
 
 
@@ -411,5 +426,6 @@ if __name__ == "__main__":
         stationary_patience=args.stationary_patience,
         roi_file=args.roi_file if args.roi_file else None,
         roi_min_iou=args.roi_min_iou,
+        num_workers=args.num_workers,
     )
 
