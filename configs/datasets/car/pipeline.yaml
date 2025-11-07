@@ -1,0 +1,38 @@
+# 차량 데이터셋 구축 파이프라인 설정 파일
+
+# 입력/출력 경로
+paths:
+  video_dir: "/data/reid/data/raw/videos/car"
+  output_base_dir: "/data/reid/data/datasets/car/output"
+  roi_file: "/data/reid/reid_master/roi.txt"  # None이면 ROI 필터링 없음
+
+# Step 1: Tracking 설정
+tracking:
+  model_path: "checkpoints/detection/yolo11n.pt"
+  conf: 0.7
+  iou: 0.5
+  max_frames_per_track: 200
+  roi_min_iou: 0.7
+  num_workers: null  # null이면 자동 (CPU 코어 수의 70%)
+
+# Step 2: Filtering 설정
+filtering:
+  lp_detection_model_path: "checkpoints/detection/lp_detection.pt"
+
+# Step 3: Pseudo Labeling 설정
+pseudo_labeling:
+  vllm:
+    host: "0.0.0.0"
+    port: 8000
+    model: "Qwen/Qwen3-VL-4B-Instruct"
+    gpu_util: 0.8
+    prompt: "차량 번호판의 문자를 추출해주세요."
+    max_tokens: 300
+  label_filename: "label.txt"
+
+# 단계별 실행 제어
+skip_steps:
+  tracking: false
+  filtering: false
+  labeling: false
+

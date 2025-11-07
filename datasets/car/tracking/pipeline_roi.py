@@ -95,6 +95,8 @@ def is_bbox_in_roi(bbox, rois, min_iou=0.7):
     if not rois:
         return True  # ROI가 없으면 모든 박스 허용
     
+    bbox_x1, bbox_y1, bbox_x2, bbox_y2 = bbox
+    
     for roi_x1, roi_y1, roi_x2, roi_y2 in rois:
         # ROI 좌표 정규화 (x1 < x2, y1 < y2 보장)
         roi_x_min, roi_x_max = min(roi_x1, roi_x2), max(roi_x1, roi_x2)
@@ -330,8 +332,13 @@ def run(
         rois = parse_roi_file(roi_file)
         if rois:
             print(f"총 {len(rois)}개의 ROI가 로드되었습니다.")
+            print(f"ROI 필터링 최소 IoU 임계값: {roi_min_iou}")
+            for i, roi in enumerate(rois):
+                print(f"  ROI {i+1}: {roi}")
         else:
             print("경고: ROI 파일에서 유효한 ROI를 찾을 수 없습니다. ROI 필터링 없이 진행합니다.")
+    else:
+        print("ROI 파일이 지정되지 않았습니다. ROI 필터링 없이 진행합니다.")
     
     print(f"총 {len(video_files)}개의 비디오 파일을 처리합니다.")
     

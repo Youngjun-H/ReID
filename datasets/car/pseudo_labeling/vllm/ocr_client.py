@@ -47,13 +47,49 @@ class VLLMOCRClient:
             auto_start: 자동으로 서버 시작 여부
             show_log: 로그 표시 여부
         """
+        # 프로젝트 루트 찾기
+        project_root = Path(__file__).parent.parent.parent.parent.parent
+        cache_dir = project_root / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Triton 캐시 디렉토리 설정 (환경 변수가 없으면 프로젝트 루트의 cache/triton 사용)
+        if "TRITON_CACHE_DIR" not in os.environ:
+            triton_cache_dir = cache_dir / "triton"
+            triton_cache_dir.mkdir(parents=True, exist_ok=True)
+            os.environ["TRITON_CACHE_DIR"] = str(triton_cache_dir)
+            print(f"Triton 캐시 디렉토리 자동 설정: {triton_cache_dir}")
+        
+        # 임시 파일 디렉토리 설정 (HuggingFace 다운로드 임시 파일용)
+        if "TMPDIR" not in os.environ:
+            tmp_dir = cache_dir / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            os.environ["TMPDIR"] = str(tmp_dir)
+            os.environ["TEMP"] = str(tmp_dir)
+            os.environ["TMP"] = str(tmp_dir)
+            print(f"임시 파일 디렉토리 자동 설정: {tmp_dir}")
+        
+        # HuggingFace 임시 파일 디렉토리 설정
+        if "HF_HUB_TEMP" not in os.environ:
+            os.environ["HF_HUB_TEMP"] = str(cache_dir / "tmp")
+        
+        # VLLM 캐시 디렉토리 설정 (중요!)
+        if "VLLM_CACHE_ROOT" not in os.environ:
+            vllm_cache_dir = cache_dir / "vllm"
+            vllm_cache_dir.mkdir(parents=True, exist_ok=True)
+            os.environ["VLLM_CACHE_ROOT"] = str(vllm_cache_dir)
+            print(f"VLLM 캐시 디렉토리 자동 설정: {vllm_cache_dir}")
+        
+        # VLLM Usage Stats 파일 경로 설정
+        if "VLLM_USAGE_STATS_PATH" not in os.environ:
+            os.environ["VLLM_USAGE_STATS_PATH"] = str(cache_dir / "vllm" / "usage_stats.json")
+            print(f"VLLM Usage Stats 경로 자동 설정: {os.environ['VLLM_USAGE_STATS_PATH']}")
         # VLLMServer 모듈 로드
-        vllm_server_path = Path(__file__).parent / "vllm_server.py"
-        spec = importlib.util.spec_from_file_location("vllm_server", str(vllm_server_path))
-        vllm_server = importlib.util.module_from_spec(spec)
-        sys.modules["vllm_server"] = vllm_server
-        spec.loader.exec_module(vllm_server)
-        VLLMServer = vllm_server.VLLMServer
+        server_path = Path(__file__).parent / "server.py"
+        spec = importlib.util.spec_from_file_location("server", str(server_path))
+        server = importlib.util.module_from_spec(spec)
+        sys.modules["server"] = server
+        spec.loader.exec_module(server)
+        VLLMServer = server.VLLMServer
         
         # 서버 초기화
         self.server = VLLMServer(
@@ -83,11 +119,35 @@ class VLLMOCRClient:
         """서버 시작"""
         self.server.start(show_log=show_log)
     
-    def wait_for_ready(self, max_retries: int = 50):
-        """서버가 준비될 때까지 대기"""
+    def wait_for_ready(self, max_retries: int = 120, check_interval: float = 2.0):
+        """
+        서버가 준비될 때까지 대기
+        
+        Args:
+            max_retries: 최대 재시도 횟수 (기본값: 120, 약 4분)
+            check_interval: 각 체크 간격 (초, 기본값: 2.0)
+        """
+        print(f"서버 준비 대기 중... (최대 {max_retries * check_interval:.0f}초)")
+        
+        for attempt in range(max_retries):
+            try:
+                result = self.server.health_check()
+                if "READY" in result:
+                    print(f"서버 준비 완료! (시도 {attempt + 1}/{max_retries})")
+                    return
+                else:
+                    if attempt % 10 == 0:  # 10번마다 진행 상황 출력
+                        print(f"서버 준비 대기 중... (시도 {attempt + 1}/{max_retries})")
+                    time.sleep(check_interval)
+            except Exception as e:
+                if attempt % 10 == 0:
+                    print(f"헬스 체크 오류 (시도 {attempt + 1}/{max_retries}): {e}")
+                time.sleep(check_interval)
+        
+        # 최종 체크
         result = self.server.health_check()
         if "READY" not in result:
-            raise RuntimeError(f"서버 준비 실패: {result}")
+            raise RuntimeError(f"서버 준비 실패 (최대 재시도 횟수 초과): {result}")
         print("서버 준비 완료")
     
     def stop(self):

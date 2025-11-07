@@ -11,6 +11,22 @@ class VLLMServer:
         self.log = log
         self.extra_args = kwargs
     def start(self, show_log: bool = False):
+        # 환경 변수에서 캐시 디렉토리 가져오기
+        triton_cache = os.environ.get("TRITON_CACHE_DIR", None)
+        vllm_cache = os.environ.get("VLLM_CACHE_ROOT", None)
+        vllm_usage_stats = os.environ.get("VLLM_USAGE_STATS_PATH", None)
+        
+        # 서브프로세스에 전달할 환경 변수 준비 (현재 환경 변수 복사)
+        env = os.environ.copy()
+        
+        # VLLM 관련 환경 변수가 설정되어 있으면 확인
+        if vllm_cache:
+            print(f"VLLM 캐시 디렉토리: {vllm_cache}")
+        if vllm_usage_stats:
+            print(f"VLLM Usage Stats 경로: {vllm_usage_stats}")
+        if triton_cache:
+            print(f"Triton 캐시 디렉토리: {triton_cache}")
+        
         cmd = [
             sys.executable, "-m", "vllm.entrypoints.openai.api_server",
             "--host", self.host, "--port", str(self.port),
@@ -29,7 +45,7 @@ class VLLMServer:
         print(f"서버 시작 명령: {' '.join(cmd)}")
         if show_log:
             # 로그를 화면에도 출력하고 파일에도 저장 (tee 방식)
-            self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            self.proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
             self.pid = self.proc.pid
             print(f"서버 시작 완료: {self.pid}")
             print("=" * 80)
@@ -45,11 +61,26 @@ class VLLMServer:
             self.log_thread.start()
         else:
             # 기존 방식: 로그를 파일로만 저장
-            self.proc = subprocess.Popen(cmd, stdout=open(self.log, "w"), stderr=subprocess.STDOUT, text=True)
-            self.pid = self.proc.pid
-            print(f"서버 시작 완료: {self.pid}")
-            print(f"로그 확인: tail -f {self.log}")
-            print(f"준비되면 server.health_check()를 호출하세요.")
+            # 로그 파일 디렉토리 생성
+            log_dir = os.path.dirname(self.log)
+            if log_dir and not os.path.exists(log_dir):
+                os.makedirs(log_dir, exist_ok=True)
+            
+            try:
+                self.proc = subprocess.Popen(
+                    cmd, 
+                    env=env,
+                    stdout=open(self.log, "w", encoding="utf-8"), 
+                    stderr=subprocess.STDOUT, 
+                    text=True
+                )
+                self.pid = self.proc.pid
+                print(f"서버 시작 완료 (PID: {self.pid})")
+                print(f"로그 확인: tail -f {self.log}")
+                print(f"서버가 준비될 때까지 대기 중...")
+            except Exception as e:
+                print(f"서버 시작 실패: {e}")
+                raise
     def stop(self):
         try:
             os.kill(self.pid, signal.SIGTERM)
@@ -60,17 +91,26 @@ class VLLMServer:
             print(f"최근 로그 50줄: {open(self.log).readlines()[-50:]}")
             return False
     def health_check(self):
+        """
+        서버 헬스 체크
+        
+        Returns:
+            "READY: {response_json}" 형식의 문자열 또는 실패 메시지
+        """
         url = f"http://127.0.0.1:{self.port}/v1/models"
-        for _ in range(50):
-            try:
-                r = requests.get(url, timeout=2)
-                if r.status_code == 200:
-                    resp = f"READY: {r.json()}"
-                    return resp
-            except Exception as e:
-                print(f"헬스 체크 실패: {e}")
-                time.sleep(1)
-        return f"서버 준비 실패. 최근 로그 50줄: {open(self.log).readlines()[-50:]}"
+        try:
+            r = requests.get(url, timeout=5)
+            if r.status_code == 200:
+                resp = f"READY: {r.json()}"
+                return resp
+            else:
+                return f"서버 응답 오류: HTTP {r.status_code}"
+        except requests.exceptions.ConnectionError:
+            return "서버 연결 실패: 서버가 아직 시작 중이거나 포트가 열리지 않았습니다."
+        except requests.exceptions.Timeout:
+            return "서버 응답 시간 초과: 서버가 과부하 상태일 수 있습니다."
+        except Exception as e:
+            return f"헬스 체크 오류: {str(e)}"
     # def restart(self):
     #     self.stop()
     #     self.start()

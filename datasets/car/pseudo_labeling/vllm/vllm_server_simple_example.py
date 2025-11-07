@@ -3,6 +3,7 @@ VLLM OCR 서버 예제 및 디렉토리 처리 스크립트
 """
 import argparse
 import sys
+import os
 from pathlib import Path
 try:
     from .ocr_client import VLLMOCRClient
@@ -13,6 +14,34 @@ except ImportError:
 
 
 def main():
+    # 프로젝트 루트 찾기 및 임시 파일 디렉토리 설정
+    project_root = Path(__file__).parent.parent.parent.parent.parent
+    cache_dir = project_root / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 임시 파일 디렉토리 설정 (환경 변수가 없으면 설정)
+    if "TMPDIR" not in os.environ:
+        tmp_dir = cache_dir / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        os.environ["TMPDIR"] = str(tmp_dir)
+        os.environ["TEMP"] = str(tmp_dir)
+        os.environ["TMP"] = str(tmp_dir)
+    
+    # HuggingFace 임시 파일 디렉토리 설정
+    if "HF_HUB_TEMP" not in os.environ:
+        os.environ["HF_HUB_TEMP"] = str(cache_dir / "tmp")
+    
+    # VLLM 캐시 디렉토리 설정 (중요!)
+    if "VLLM_CACHE_ROOT" not in os.environ:
+        vllm_cache_dir = cache_dir / "vllm"
+        vllm_cache_dir.mkdir(parents=True, exist_ok=True)
+        os.environ["VLLM_CACHE_ROOT"] = str(vllm_cache_dir)
+        print(f"VLLM 캐시 디렉토리 자동 설정: {vllm_cache_dir}")
+    
+    # VLLM Usage Stats 파일 경로 설정
+    if "VLLM_USAGE_STATS_PATH" not in os.environ:
+        os.environ["VLLM_USAGE_STATS_PATH"] = str(cache_dir / "vllm" / "usage_stats.json")
+        print(f"VLLM Usage Stats 경로 자동 설정: {os.environ['VLLM_USAGE_STATS_PATH']}")
     parser = argparse.ArgumentParser(description="디렉토리 내 이미지에 대해 OCR을 수행하고 label.txt를 생성합니다.")
     parser.add_argument(
         "directory",
@@ -58,7 +87,7 @@ def main():
     parser.add_argument(
         "--label-filename",
         type=str,
-        default="label.txt",
+        default="label_qwen3.txt",
         help="생성할 라벨 파일 이름 (기본값: label.txt)"
     )
     parser.add_argument(
