@@ -41,7 +41,8 @@ def get_image_files(directory: str) -> List[str]:
 def process_directory(
     directory: str,
     ocr_client: VLLMOCRClient,
-    label_filename: str = "label.txt"
+    label_filename: str = "label.txt",
+    skip_existing: bool = True
 ) -> Optional[str]:
     """
     디렉토리 내의 모든 이미지에 대해 OCR을 수행하고 label.txt 생성
@@ -50,10 +51,20 @@ def process_directory(
         directory: 처리할 디렉토리 경로
         ocr_client: OCR 클라이언트 인스턴스
         label_filename: 생성할 라벨 파일 이름
+        skip_existing: label.txt가 이미 있으면 건너뛰기 (기본값: True)
         
     Returns:
         생성된 라벨 텍스트, 실패 시 None
     """
+    label_path = Path(directory) / label_filename
+    
+    # 이미 label.txt가 있으면 건너뛰기 (중복 방지)
+    if skip_existing and label_path.exists():
+        print(f"디렉토리 이미 처리됨 (건너뛰기): {directory}")
+        with open(label_path, 'r', encoding='utf-8') as f:
+            existing_label = f.read().strip()
+        return existing_label
+    
     print(f"\n{'='*80}")
     print(f"디렉토리 처리 시작: {directory}")
     print(f"{'='*80}")
@@ -78,7 +89,6 @@ def process_directory(
         return None
     
     # label.txt 저장
-    label_path = Path(directory) / label_filename
     with open(label_path, 'w', encoding='utf-8') as f:
         f.write(label)
     
@@ -93,7 +103,8 @@ def process_recursive(
     root_directory: str,
     ocr_client: VLLMOCRClient,
     label_filename: str = "label.txt",
-    max_depth: Optional[int] = None
+    max_depth: Optional[int] = None,
+    skip_existing: bool = True
 ) -> dict:
     """
     루트 디렉토리부터 재귀적으로 하위 디렉토리를 처리
@@ -103,6 +114,7 @@ def process_recursive(
         ocr_client: OCR 클라이언트 인스턴스
         label_filename: 생성할 라벨 파일 이름
         max_depth: 최대 탐색 깊이 (None이면 제한 없음)
+        skip_existing: label.txt가 이미 있으면 건너뛰기 (기본값: True)
         
     Returns:
         처리 결과 딕셔너리 {디렉토리: 라벨}
@@ -112,20 +124,32 @@ def process_recursive(
         raise ValueError(f"디렉토리가 존재하지 않습니다: {root_directory}")
     
     results = {}
+    skipped_count = 0
+    processed_count = 0
     
     # 현재 디렉토리에 이미지가 있는지 확인
     image_files = get_image_files(str(root_path))
     
     if image_files:
         # 이미지가 있으면 현재 디렉토리 처리
-        label = process_directory(str(root_path), ocr_client, label_filename)
-        if label:
-            results[str(root_path)] = label
+        # label.txt가 이미 있으면 건너뛰기
+        label_path = root_path / label_filename
+        if skip_existing and label_path.exists():
+            skipped_count += 1
+            with open(label_path, 'r', encoding='utf-8') as f:
+                existing_label = f.read().strip()
+            results[str(root_path)] = existing_label
+        else:
+            label = process_directory(str(root_path), ocr_client, label_filename, skip_existing)
+            if label:
+                results[str(root_path)] = label
+                processed_count += 1
     else:
         # 이미지가 없으면 하위 디렉토리 탐색
         print(f"이미지가 없는 디렉토리, 하위 디렉토리 탐색: {root_path}")
         
         def process_dir_recursive(current_dir: Path, depth: int = 0):
+            nonlocal skipped_count, processed_count
             if max_depth is not None and depth > max_depth:
                 return
             
@@ -135,15 +159,29 @@ def process_recursive(
                     # 하위 디렉토리에 이미지가 있는지 확인
                     sub_image_files = get_image_files(str(item))
                     if sub_image_files:
-                        # 이미지가 있으면 처리
-                        label = process_directory(str(item), ocr_client, label_filename)
-                        if label:
-                            results[str(item)] = label
+                        # label.txt가 이미 있으면 건너뛰기
+                        label_path = item / label_filename
+                        if skip_existing and label_path.exists():
+                            skipped_count += 1
+                            with open(label_path, 'r', encoding='utf-8') as f:
+                                existing_label = f.read().strip()
+                            results[str(item)] = existing_label
+                        else:
+                            # 이미지가 있으면 처리
+                            label = process_directory(str(item), ocr_client, label_filename, skip_existing)
+                            if label:
+                                results[str(item)] = label
+                                processed_count += 1
                     else:
                         # 이미지가 없으면 더 깊이 탐색
                         process_dir_recursive(item, depth + 1)
         
         process_dir_recursive(root_path)
+    
+    if skipped_count > 0:
+        print(f"\n처리 완료: 새로 처리된 디렉토리 {processed_count}개, 건너뛴 디렉토리 {skipped_count}개")
+    else:
+        print(f"\n처리 완료: 새로 처리된 디렉토리 {processed_count}개")
     
     return results
 

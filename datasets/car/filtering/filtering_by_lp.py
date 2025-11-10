@@ -122,9 +122,40 @@ def process_runs_directory(runs_dir: str, output_dir: str, lp_detection_model_pa
         if not image_files:
             continue
         
+        # 이미 저장된 파일 목록 확인 (중복 방지)
+        # 저장된 파일명 형식: {original_name}_conf{conf_value:.2f}
+        # 원본 파일명으로 매칭하기 위해 저장된 파일명에서 _conf 부분을 제거한 원본 이름 추출
+        existing_original_names = set()
+        if output_track_dir.exists():
+            for ext in image_extensions:
+                for f in output_track_dir.glob(f"*{ext}"):
+                    # 파일명에서 _conf{숫자} 부분을 제거하여 원본 이름 추출
+                    stem = f.stem
+                    if "_conf" in stem:
+                        original_name = stem.rsplit("_conf", 1)[0]
+                        existing_original_names.add(original_name)
+                    else:
+                        existing_original_names.add(stem)
+                for f in output_track_dir.glob(f"*{ext.upper()}"):
+                    stem = f.stem
+                    if "_conf" in stem:
+                        original_name = stem.rsplit("_conf", 1)[0]
+                        existing_original_names.add(original_name)
+                    else:
+                        existing_original_names.add(stem)
+        
         # 번호판이 감지된 이미지만 필터링 (confidence 값 및 bounding box 포함)
         filtered_images = []  # (image_path, confidence, bbox) 튜플 리스트
+        new_images_count = 0
+        skipped_count = 0
+        
         for image_path in tqdm(image_files, desc=f"    {relative_path} 이미지 검사", leave=False):
+            # 이미 저장된 파일인지 확인 (원본 이름으로 비교)
+            original_name = image_path.stem
+            if original_name in existing_original_names:
+                skipped_count += 1
+                continue
+            
             has_lp, conf_value, bbox = detect_license_plate(str(image_path), lp_detection_model)
             if has_lp:
                 filtered_images.append((image_path, conf_value, bbox))
@@ -151,7 +182,11 @@ def process_runs_directory(runs_dir: str, output_dir: str, lp_detection_model_pa
                 original_ext = image_path.suffix
                 new_filename = f"{original_name}_conf{conf_value:.2f}{original_ext}"
                 output_image_path = output_track_dir / new_filename
-                cv2.imwrite(str(output_image_path), image)
+                
+                # 파일이 이미 존재하는지 확인 (중복 방지)
+                if not output_image_path.exists():
+                    cv2.imwrite(str(output_image_path), image)
+                    new_images_count += 1
                 
                 # 번호판 crop 이미지 저장
                 if output_lp_path and bbox:
@@ -159,10 +194,16 @@ def process_runs_directory(runs_dir: str, output_dir: str, lp_detection_model_pa
                     if lp_cropped is not None:
                         lp_filename = f"{original_name}_lp_conf{conf_value:.2f}{original_ext}"
                         output_lp_path_full = output_lp_track_dir / lp_filename
-                        cv2.imwrite(str(output_lp_path_full), lp_cropped)
+                        # 파일이 이미 존재하는지 확인 (중복 방지)
+                        if not output_lp_path_full.exists():
+                            cv2.imwrite(str(output_lp_path_full), lp_cropped)
             
             lp_info = f", 번호판 crop: {len(filtered_images)}개" if output_lp_path else ""
-            print(f"  {relative_path}: {len(filtered_images)}/{len(image_files)} 이미지 저장 (번호판 감지된 이미지만 저장){lp_info}")
+            skip_info = f", 건너뛴 파일: {skipped_count}개" if skipped_count > 0 else ""
+            new_info = f", 새로 저장: {new_images_count}개" if new_images_count > 0 else ""
+            print(f"  {relative_path}: {len(filtered_images)}/{len(image_files)} 번호판 감지{skip_info}{new_info}{lp_info}")
+        elif skipped_count > 0:
+            print(f"  {relative_path}: 모든 파일 이미 처리됨 (건너뛴 파일: {skipped_count}개)")
 
 
 def parse_args() -> argparse.Namespace:
