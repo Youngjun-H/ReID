@@ -103,8 +103,15 @@ def main():
     
     args = parser.parse_args()
     
+    # allowed_local_media_path 계산: 입력 디렉토리와 프로젝트 루트를 모두 포함하는 상위 경로
+    directory_path = Path(args.directory).resolve()
+    # 입력 디렉토리와 프로젝트 루트의 공통 상위 경로 찾기
+    # 예: /data/reid/data/... 와 /data/reid/reid_master -> /data/reid
+    allowed_path = "/data/reid"  # 두 경로 모두 포함하는 최상위 경로
+    
     # OCR 클라이언트 초기화
     print("OCR 클라이언트 초기화 중...")
+    print(f"허용된 미디어 경로: {allowed_path}")
     ocr_client = VLLMOCRClient(
         host=args.host,
         port=args.port,
@@ -114,7 +121,7 @@ def main():
         tp=1,
         log="vllm_server.log",
         max_model_len=40000,
-        allowed_local_media_path="/data/reid/reid_master",
+        allowed_local_media_path=allowed_path,
         prompt=args.prompt,
         max_tokens=args.max_tokens,
         auto_start=not args.no_auto_start,
@@ -123,8 +130,6 @@ def main():
     
     try:
         # 디렉토리 처리
-        directory_path = Path(args.directory)
-        
         if not directory_path.exists():
             print(f"오류: 디렉토리가 존재하지 않습니다: {args.directory}")
             sys.exit(1)
