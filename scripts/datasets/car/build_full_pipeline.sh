@@ -1,8 +1,23 @@
 #!/bin/bash
-# 번호판 recognition pseudo labeling 스크립트
-# 사용법: ./build_pseudo_labeling.sh <filtered_dir>
+# 차량 데이터셋 구축 통합 파이프라인 실행 스크립트
+# 사용법: ./build_full_pipeline.sh <video_dir> <output_dir> [옵션]
 
-FILTERED_DIR=${1:-"/data/reid/reid_master/test/03_license_plates"}
+# 인자 파싱
+VIDEO_DIR=${1:-""}
+OUTPUT_DIR=${2:-""}
+
+if [ -z "$VIDEO_DIR" ] || [ -z "$OUTPUT_DIR" ]; then
+    echo "사용법: $0 <video_dir> <output_dir> [옵션]"
+    echo ""
+    echo "예제:"
+    echo "  $0 /data/reid/data/raw/videos/car /data/reid/data/datasets/car/output"
+    echo ""
+    echo "옵션:"
+    echo "  --skip_tracking      Step 1 (Tracking) 건너뛰기"
+    echo "  --skip_filtering     Step 2 (Filtering) 건너뛰기"
+    echo "  --skip_labeling      Step 3 (Pseudo Labeling) 건너뛰기"
+    exit 1
+fi
 
 # 프로젝트 루트 찾기
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,8 +72,11 @@ echo "  - VLLM 캐시: $VLLM_CACHE_ROOT"
 echo "  - VLLM Usage Stats: $VLLM_USAGE_STATS_PATH"
 echo "=========================================="
 
+# Python 모듈로 실행
 cd "$PROJECT_ROOT"
 
-python -m datasets.car.pseudo_labeling.vllm.vllm_server_simple_example \
-    "$FILTERED_DIR" \
-    --prompt "차량 번호판의 문자를 추출해주세요."
+python -m datasets.car.pipeline \
+    --video_dir "$VIDEO_DIR" \
+    --output_dir "$OUTPUT_DIR" \
+    "${@:3}"  # 나머지 인자들 전달
+

@@ -83,7 +83,7 @@ class RTSPPipeline:
         vllm_host: str = "0.0.0.0",
         vllm_port: int = 8000,
         vllm_model: str = "Qwen/Qwen3-VL-4B-Instruct",
-        vllm_gpu_util: float = 0.6,  # GPU 메모리 일부를 다른 모델을 위해 남김
+        vllm_gpu_util: float = 0.8,  # GPU 메모리 일부를 다른 모델을 위해 남김
         vllm_prompt: str = "차량 번호판의 문자를 추출해주세요.",
         vllm_max_tokens: int = 300,
         label_filename: str = "label.txt",
